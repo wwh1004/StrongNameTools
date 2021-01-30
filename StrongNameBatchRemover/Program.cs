@@ -2,10 +2,15 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using dnlib.DotNet;
 
 namespace StrongNameBatchRemover {
 	internal static class Program {
+		private static readonly byte[] NullWithSpacesBytes = Encoding.UTF8.GetBytes("null".PadRight(16));
+		private static readonly Dictionary<string, byte[]> FileDatas = new Dictionary<string, byte[]>();
+		// TODO: 更新缓存方式,可以放到上下文里面
+
 		private sealed class Context {
 			public List<ModuleDefMD> Modules;
 			public List<(ModuleDefMD Module, ModuleDefMD[] References)> ReferencesMap;
@@ -131,10 +136,14 @@ namespace StrongNameBatchRemover {
 
 		private static void CreatePatchInfos(string[] assemblyPaths, Context context) {
 			Console.WriteLine("开始创建 PatchInfo");
-			context.PendingModules = assemblyPaths.Select(m => context.Modules.First(n => n.Location == m)).Where(t => t.IsStrongNameSigned).ToHashSet();
+			context.PendingModules = assemblyPaths.Select(m => context.Modules.FirstOrDefault(n => n.Location == m)).Where(t => t?.IsStrongNameSigned == true).ToHashSet();
 			while (context.PendingModules.Count != 0) {
 				context.ProcessingModules = context.PendingModules;
 				context.PendingModules = new HashSet<ModuleDefMD>();
+				//{
+				//	Parallel.ForEach(context.ProcessingModules, t => CreatePatchInfos(t, context));
+				//	// TODO: 多线程支持
+				//}
 				foreach (var module in context.ProcessingModules)
 					CreatePatchInfos(module, context);
 			}
@@ -156,9 +165,11 @@ namespace StrongNameBatchRemover {
 			Console.WriteLine($"PatchInfo: {module}");
 			CreateStrongNamePatchInfo(module, context);
 			// 获取refee本身的强名称PatchInfo
-			foreach (var refer in context.Modules)
+			foreach (var refer in context.Modules) {
 				CreateAssemblyRefPatchInfo(refer, module, context);
-			// 获取引用了refee的程序集的AssemblyRef表PatchInfo
+				// 获取引用了refee的程序集的AssemblyRef表PatchInfo
+				CreateAssemblyNamePatchInfo(refer, module, context);
+			}
 		}
 
 		/// <summary>
@@ -179,9 +190,6 @@ namespace StrongNameBatchRemover {
 			// Cor20Header.StrongNameSignature
 			var assemblyTable = module.TablesStream.AssemblyTable;
 			int tableOffset = (int)assemblyTable.StartOffset;
-#if DEBUG
-			System.Diagnostics.Debug.Assert(assemblyTable.Rows == 1);
-#endif
 			int rowOffset = (int)(module.Assembly.Rid - 1) * (int)assemblyTable.RowSize;
 			int flagsColumnOffset = assemblyTable.Columns[5].Offset;
 			int publicKeyColumnOffset = assemblyTable.Columns[6].Offset;
@@ -223,7 +231,26 @@ namespace StrongNameBatchRemover {
 				context.PendingModules.Add(refer);
 		}
 
+		private static void CreateAssemblyNamePatchInfo(ModuleDefMD refer, ModuleDefMD refee, Context context) {
+			if (!FileDatas.TryGetValue(refer.Location, out byte[] data)) {
+				data = File.ReadAllBytes(refer.Location);
+				FileDatas.Add(refer.Location, data);
+			}
+			int[] offsets = AssemblyNameFinder.FindAll(data, refee.Assembly);
+			if (offsets.Length == 0)
+				return;
+
+			Console.WriteLine($"  PatchInfo (AssemblyName): {refer.Assembly.Name} -> {refee.Assembly.Name}");
+			var patchInfo = new PatchInfo();
+			foreach (int offset in offsets)
+				patchInfo.Add(offset, NullWithSpacesBytes);
+			UpdatePatchInfo(context.PatchInfos, refer, patchInfo);
+			if (refer.IsStrongNameSigned && !context.ProcessingModules.Contains(refer) && !context.ProcessedModules.Contains(refer))
+				context.PendingModules.Add(refer);
+		}
+
 		private static void UpdatePatchInfo(Dictionary<ModuleDefMD, PatchInfo> patchInfos, ModuleDefMD module, PatchInfo patchInfo) {
+			// TODO: 多线程支持
 			if (patchInfos.TryGetValue(module, out var main))
 				MergePatchInfo(main, patchInfo);
 			else
