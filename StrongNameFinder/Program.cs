@@ -49,28 +49,28 @@ namespace StrongNameFinder {
 				}
 				indent += 2;
 			}
-			//var strongNameModules = modules.Where(t => t.IsStrongNameSigned).ToArray();
-			//foreach (var strongNameModule in strongNameModules) {
-			//	var context = new Context(modules, xrefsFromMap) {
-			//		PendingModules = new HashSet<ModuleDefMD> { strongNameModule }
-			//	};
-			//	int indent = 0;
-			//	while (context.PendingModules.Count != 0) {
-			//		context.ProcessingModules = context.PendingModules;
-			//		context.PendingModules = new HashSet<ModuleDefMD>();
-			//		foreach (var module in context.ProcessingModules) {
-			//			Console.WriteLine(new string(' ', indent) + Path.GetRelativePath(directory, module.Location));
-			//			foreach (var xref in context.XrefsFromMap[module]) {
-			//				if (!context.ProcessingModules.Contains(xref) && !context.ProcessedModules.Contains(xref))
-			//					context.PendingModules.Add(xref);
-			//			}
-			//			if (!context.ProcessedModules.Add(module))
-			//				throw new InvalidOperationException();
-			//		}
-			//		indent += 2;
-			//	}
-			//	Console.WriteLine();
-			//}
+			Console.WriteLine();
+			foreach (var strongNameModule in modules.Where(t => t.IsStrongNameSigned)) {
+				context = new Context(modules, xrefsFromMap) {
+					PendingModules = new HashSet<ModuleDefMD> { strongNameModule }
+				};
+				indent = 0;
+				while (context.PendingModules.Count != 0) {
+					context.ProcessingModules = context.PendingModules;
+					context.PendingModules = new HashSet<ModuleDefMD>();
+					foreach (var module in context.ProcessingModules) {
+						Console.WriteLine(new string(' ', indent) + Path.GetRelativePath(directory, module.Location));
+						foreach (var xref in context.XrefsFromMap[module]) {
+							if (!context.ProcessingModules.Contains(xref) && !context.ProcessedModules.Contains(xref))
+								context.PendingModules.Add(xref);
+						}
+						if (!context.ProcessedModules.Add(module))
+							throw new InvalidOperationException();
+					}
+					indent += 2;
+				}
+				Console.WriteLine();
+			}
 			foreach (var module in modules)
 				module.Dispose();
 		}
