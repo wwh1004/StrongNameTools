@@ -1,31 +1,55 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 using dnlib.DotNet;
 
 namespace StrongNameBatchRemover {
 	internal static class Program {
 		private static readonly byte[] NullWithSpacesBytes = Encoding.UTF8.GetBytes("null".PadRight(16));
-		private static readonly Dictionary<string, byte[]> FileDatas = new Dictionary<string, byte[]>();
-		// TODO: 更新缓存方式,可以放到上下文里面
 
 		private sealed class Context {
 			public List<ModuleDefMD> Modules;
-			public List<(ModuleDefMD Module, ModuleDefMD[] References)> ReferencesMap;
-			public Dictionary<ModuleDefMD, PatchInfo> PatchInfos;
-			public HashSet<ModuleDefMD> PendingModules;
-			public HashSet<ModuleDefMD> ProcessingModules;
-			public HashSet<ModuleDefMD> ProcessedModules;
+			public Dictionary<ModuleDefMD, ModuleDefMD[]> XrefsFromMap;
+			public ConcurrentDictionary<ModuleDefMD, PatchInfo> PatchInfos;
+			public ConcurrentDictionary<ModuleDefMD, bool> PendingModules;
+			public ConcurrentDictionary<ModuleDefMD, bool> ProcessingModules;
+			public ConcurrentDictionary<ModuleDefMD, bool> ProcessedModules;
+			public ConcurrentDictionary<ModuleDefMD, byte[]> ModuleDatas;
+			public ThreadSafeLogger Logger;
 
-			public Context(List<ModuleDefMD> modules, List<(ModuleDefMD Module, ModuleDefMD[] References)> referencesMap) {
+			public Context(List<ModuleDefMD> modules, Dictionary<ModuleDefMD, ModuleDefMD[]> xrefsFromMap) {
 				Modules = modules;
-				ReferencesMap = referencesMap;
-				PatchInfos = new Dictionary<ModuleDefMD, PatchInfo>();
-				PendingModules = new HashSet<ModuleDefMD>();
-				ProcessingModules = new HashSet<ModuleDefMD>();
-				ProcessedModules = new HashSet<ModuleDefMD>();
+				XrefsFromMap = xrefsFromMap;
+				PatchInfos = new ConcurrentDictionary<ModuleDefMD, PatchInfo>();
+				PendingModules = new ConcurrentDictionary<ModuleDefMD, bool>();
+				ProcessingModules = new ConcurrentDictionary<ModuleDefMD, bool>();
+				ProcessedModules = new ConcurrentDictionary<ModuleDefMD, bool>();
+				ModuleDatas = new ConcurrentDictionary<ModuleDefMD, byte[]>();
+				Logger = new ThreadSafeLogger();
+			}
+		}
+
+		private sealed class ThreadSafeLogger {
+			private static readonly List<string> PlaceHolder = new List<string>();
+			private readonly ConcurrentDictionary<ModuleDefMD, List<string>> _logs = new ConcurrentDictionary<ModuleDefMD, List<string>>();
+
+			public ThreadSafeLogger BeginLog(ModuleDefMD module) {
+				return _logs.TryAdd(module, new List<string>()) ? this : throw new InvalidOperationException();
+			}
+
+			public ThreadSafeLogger Log(ModuleDefMD module, string text) {
+				_logs[module].Add(text);
+				return this;
+			}
+
+			public void EndLog(ModuleDefMD module) {
+				var log = _logs[module];
+				Console.WriteLine(string.Join(Environment.NewLine, log));
+				_logs[module] = PlaceHolder;
 			}
 		}
 
@@ -38,8 +62,10 @@ namespace StrongNameBatchRemover {
 
 		private static void Execute(string[] assemblyPaths, string directory) {
 			var modules = LoadModules(directory);
-			var referencesMap = LoadReferencesMap(modules);
-			var context = new Context(modules, referencesMap);
+			if (assemblyPaths.Length == 0)
+				assemblyPaths = modules.Select(t => t.Location).ToArray();
+			var xrefsFromMap = LoadXrefsFromMap(LoadXrefsToMap(modules));
+			var context = new Context(modules, xrefsFromMap);
 			CreatePatchInfos(assemblyPaths, context);
 			foreach (var module in modules)
 				module.Dispose();
@@ -102,9 +128,9 @@ namespace StrongNameBatchRemover {
 			return moduleContext;
 		}
 
-		private static List<(ModuleDefMD Module, ModuleDefMD[] References)> LoadReferencesMap(IEnumerable<ModuleDefMD> modules) {
+		private static Dictionary<ModuleDefMD, ModuleDefMD[]> LoadXrefsToMap(IEnumerable<ModuleDefMD> modules) {
 			Console.WriteLine("开始解析引用");
-			var referencesMap = new List<(ModuleDefMD Module, ModuleDefMD[] References)>();
+			var xrefsToMap = new Dictionary<ModuleDefMD, ModuleDefMD[]>();
 			foreach (var module in modules) {
 				Console.WriteLine($"正在解析 {module.Assembly.Name} 的引用");
 				var assemblyRefs = module.GetAssemblyRefs().Distinct(AssemblyNameComparer.CompareAll).Cast<AssemblyRef>().ToArray();
@@ -127,25 +153,35 @@ namespace StrongNameBatchRemover {
 						Console.WriteLine(unresolvedReference.ToString());
 				}
 
-				referencesMap.Add((module, resolvedReferences.ToArray()));
+				xrefsToMap.Add(module, resolvedReferences.ToArray());
 			}
 			Console.WriteLine("解析引用完成");
 			Console.WriteLine();
-			return referencesMap;
+			return xrefsToMap;
+		}
+
+		private static Dictionary<ModuleDefMD, ModuleDefMD[]> LoadXrefsFromMap(Dictionary<ModuleDefMD, ModuleDefMD[]> xrefsToMap) {
+			var xrefsFromMap = new Dictionary<ModuleDefMD, ModuleDefMD[]>();
+			foreach (var module in xrefsToMap.Keys) {
+				var xrefsFrom = new List<ModuleDefMD>();
+				foreach (var xrefsTo in xrefsToMap) {
+					if (xrefsTo.Value.Contains(module))
+						xrefsFrom.Add(xrefsTo.Key);
+				}
+				xrefsFromMap.Add(module, xrefsFrom.ToArray());
+			}
+			return xrefsFromMap;
 		}
 
 		private static void CreatePatchInfos(string[] assemblyPaths, Context context) {
 			Console.WriteLine("开始创建 PatchInfo");
-			context.PendingModules = assemblyPaths.Select(m => context.Modules.FirstOrDefault(n => n.Location == m)).Where(t => t?.IsStrongNameSigned == true).ToHashSet();
+			context.PendingModules = new ConcurrentDictionary<ModuleDefMD, bool>(assemblyPaths.Select(m => context.Modules.FirstOrDefault(n => n.Location == m)).Where(t => t?.IsStrongNameSigned == true).Select(t => new KeyValuePair<ModuleDefMD, bool>(t, true)));
 			while (context.PendingModules.Count != 0) {
 				context.ProcessingModules = context.PendingModules;
-				context.PendingModules = new HashSet<ModuleDefMD>();
-				//{
-				//	Parallel.ForEach(context.ProcessingModules, t => CreatePatchInfos(t, context));
-				//	// TODO: 多线程支持
-				//}
-				foreach (var module in context.ProcessingModules)
-					CreatePatchInfos(module, context);
+				context.PendingModules = new ConcurrentDictionary<ModuleDefMD, bool>();
+				//foreach (var module in context.ProcessingModules.Keys)
+				//	CreatePatchInfos(module, context);
+				Parallel.ForEach(context.ProcessingModules.Keys, t => CreatePatchInfos(t, context));
 			}
 			Console.WriteLine("创建 PatchInfo 完成");
 			Console.WriteLine();
@@ -159,17 +195,19 @@ namespace StrongNameBatchRemover {
 		private static void CreatePatchInfos(ModuleDefMD module, Context context) {
 			if (!module.IsStrongNameSigned)
 				throw new InvalidOperationException();
-			if (!context.ProcessedModules.Add(module))
+			if (!context.ProcessedModules.TryAdd(module, true))
 				throw new InvalidOperationException();
 
-			Console.WriteLine($"PatchInfo: {module}");
+			context.Logger.BeginLog(module).Log(module, $"PatchInfo: {module.Assembly.Name}");
 			CreateStrongNamePatchInfo(module, context);
 			// 获取refee本身的强名称PatchInfo
 			foreach (var refer in context.Modules) {
-				CreateAssemblyRefPatchInfo(refer, module, context);
+				CreateAssemblyRefPatchInfo(module, refer, context);
 				// 获取引用了refee的程序集的AssemblyRef表PatchInfo
-				CreateAssemblyNamePatchInfo(refer, module, context);
+				CreateAssemblyNamePatchInfo(module, refer, context);
+				// 获取CustomAttribute，Resource等存在AssemblyName位置的PatchInfo，这个不能靠XrefTo得到，有可能存在引用，但是AssemblyRef表不显示
 			}
+			context.Logger.Log(module, string.Empty).EndLog(module);
 		}
 
 		/// <summary>
@@ -178,7 +216,7 @@ namespace StrongNameBatchRemover {
 		/// <param name="module"></param>
 		/// <param name="context"></param>
 		private static void CreateStrongNamePatchInfo(ModuleDefMD module, Context context) {
-			Console.WriteLine($"  PatchInfo (StrongName): {module.Assembly.Name}");
+			context.Logger.Log(module, $"  PatchInfo (StrongName): {module.Assembly.Name}");
 			var patchInfo = new PatchInfo();
 			int cor20HeaderOffset = (int)module.Metadata.ImageCor20Header.StartOffset;
 			int offset = cor20HeaderOffset + 0x10;
@@ -200,19 +238,19 @@ namespace StrongNameBatchRemover {
 		}
 
 		/// <summary>
-		/// <paramref name="refer"/> 引用了 <paramref name="refee"/> ,<paramref name="refee"/> 是一个没强名称的模块，我们要patch掉 <paramref name="refer"/> 中 AssemblyRef 表的强名称信息
+		/// <paramref name="xrefFrom"/> 引用了 <paramref name="module"/> ,<paramref name="module"/> 是一个没强名称的模块，我们要patch掉 <paramref name="xrefFrom"/> 中 AssemblyRef 表的强名称信息
 		/// </summary>
-		/// <param name="refer"></param>
-		/// <param name="refee"></param>
+		/// <param name="module"></param>
+		/// <param name="xrefFrom"></param>
 		/// <param name="context"></param>
-		private static void CreateAssemblyRefPatchInfo(ModuleDefMD refer, ModuleDefMD refee, Context context) {
-			var assemblyRefs = refer.GetAssemblyRefs().Where(t => !t.PublicKeyOrToken.IsNullOrEmpty && (refer.Context.AssemblyResolver.Resolve(t, refer)?.ManifestModule) == refee).ToArray();
+		private static void CreateAssemblyRefPatchInfo(ModuleDefMD module, ModuleDefMD xrefFrom, Context context) {
+			var assemblyRefs = xrefFrom.GetAssemblyRefs().Where(t => !t.PublicKeyOrToken.IsNullOrEmpty && (xrefFrom.Context.AssemblyResolver.Resolve(t, xrefFrom)?.ManifestModule) == module).ToArray();
 			if (assemblyRefs.Length == 0)
 				return;
 
-			Console.WriteLine($"  PatchInfo (AssemblyRef): {refer.Assembly.Name} -> {refee.Assembly.Name}");
+			context.Logger.Log(module, $"  PatchInfo (AssemblyRef): {module.Assembly.Name} <- {xrefFrom.Assembly.Name}");
 			var patchInfo = new PatchInfo();
-			var assemblyRefTable = refer.TablesStream.AssemblyRefTable;
+			var assemblyRefTable = xrefFrom.TablesStream.AssemblyRefTable;
 			int tableOffset = (int)assemblyRefTable.StartOffset;
 			int flagsColumnOffset = assemblyRefTable.Columns[4].Offset;
 			int publicKeyOrTokenColumnOffset = assemblyRefTable.Columns[5].Offset;
@@ -226,38 +264,37 @@ namespace StrongNameBatchRemover {
 #endif
 				patchInfo.Add(tableOffset + rowOffset + publicKeyOrTokenColumnOffset, new byte[publicKeyOrTokenColumnSize]);
 			}
-			UpdatePatchInfo(context.PatchInfos, refer, patchInfo);
-			if (refer.IsStrongNameSigned && !context.ProcessingModules.Contains(refer) && !context.ProcessedModules.Contains(refer))
-				context.PendingModules.Add(refer);
+			UpdatePatchInfo(context.PatchInfos, xrefFrom, patchInfo);
+			if (xrefFrom.IsStrongNameSigned && !context.ProcessingModules.ContainsKey(xrefFrom) && !context.ProcessedModules.ContainsKey(xrefFrom))
+				context.PendingModules.TryAdd(xrefFrom, true);
 		}
 
-		private static void CreateAssemblyNamePatchInfo(ModuleDefMD refer, ModuleDefMD refee, Context context) {
-			if (!FileDatas.TryGetValue(refer.Location, out byte[] data)) {
-				data = File.ReadAllBytes(refer.Location);
-				FileDatas.Add(refer.Location, data);
-			}
-			int[] offsets = AssemblyNameFinder.FindAll(data, refee.Assembly);
+		/// <summary>
+		/// CustomAttribute，Resource等存在AssemblyName位置的PatchInfo
+		/// </summary>
+		/// <param name="module"></param>
+		/// <param name="xrefFrom"></param>
+		/// <param name="context"></param>
+		private static void CreateAssemblyNamePatchInfo(ModuleDefMD module, ModuleDefMD xrefFrom, Context context) {
+			byte[] data = context.ModuleDatas.GetOrAdd(xrefFrom, t => File.ReadAllBytes(t.Location));
+			int[] offsets = AssemblyNameFinder.FindAll(data, module.Assembly);
 			if (offsets.Length == 0)
 				return;
 
-			Console.WriteLine($"  PatchInfo (AssemblyName): {refer.Assembly.Name} -> {refee.Assembly.Name}");
+			context.Logger.Log(module, $"  PatchInfo (AssemblyName): {module.Assembly.Name} <- {xrefFrom.Assembly.Name}");
 			var patchInfo = new PatchInfo();
 			foreach (int offset in offsets)
 				patchInfo.Add(offset, NullWithSpacesBytes);
-			UpdatePatchInfo(context.PatchInfos, refer, patchInfo);
-			if (refer.IsStrongNameSigned && !context.ProcessingModules.Contains(refer) && !context.ProcessedModules.Contains(refer))
-				context.PendingModules.Add(refer);
+			UpdatePatchInfo(context.PatchInfos, xrefFrom, patchInfo);
+			if (xrefFrom.IsStrongNameSigned && !context.ProcessingModules.ContainsKey(xrefFrom) && !context.ProcessedModules.ContainsKey(xrefFrom))
+				context.PendingModules.TryAdd(xrefFrom, true);
 		}
 
-		private static void UpdatePatchInfo(Dictionary<ModuleDefMD, PatchInfo> patchInfos, ModuleDefMD module, PatchInfo patchInfo) {
-			// TODO: 多线程支持
-			if (patchInfos.TryGetValue(module, out var main))
-				MergePatchInfo(main, patchInfo);
-			else
-				patchInfos.Add(module, patchInfo);
+		private static void UpdatePatchInfo(ConcurrentDictionary<ModuleDefMD, PatchInfo> patchInfos, ModuleDefMD module, PatchInfo patchInfo) {
+			patchInfos.AddOrUpdate(module, patchInfo, (_, main) => MergePatchInfo(main, patchInfo));
 		}
 
-		private static void MergePatchInfo(PatchInfo main, PatchInfo other) {
+		private static PatchInfo MergePatchInfo(PatchInfo main, PatchInfo other) {
 			foreach (var (key, value) in other) {
 				if (main.TryGetValue(key, out byte[] oldValue)) {
 					if (!value.AsSpan().SequenceEqual(oldValue))
@@ -267,6 +304,7 @@ namespace StrongNameBatchRemover {
 					main.Add(key, value);
 				}
 			}
+			return main;
 		}
 
 		private static void ApplyPatchInfos(IEnumerable<(string AssemblyPath, PatchInfo PatchInfo)> patchInfos) {

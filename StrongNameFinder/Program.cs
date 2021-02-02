@@ -8,14 +8,14 @@ namespace StrongNameFinder {
 	internal static class Program {
 		private sealed class Context {
 			public List<ModuleDefMD> Modules;
-			public List<(ModuleDefMD Module, ModuleDefMD[] References)> ReferencesMap;
+			public Dictionary<ModuleDefMD, ModuleDefMD[]> XrefsFromMap;
 			public HashSet<ModuleDefMD> PendingModules;
 			public HashSet<ModuleDefMD> ProcessingModules;
 			public HashSet<ModuleDefMD> ProcessedModules;
 
-			public Context(List<ModuleDefMD> modules, List<(ModuleDefMD Module, ModuleDefMD[] References)> referencesMap) {
+			public Context(List<ModuleDefMD> modules, Dictionary<ModuleDefMD, ModuleDefMD[]> xrefsFromMap) {
 				Modules = modules;
-				ReferencesMap = referencesMap;
+				XrefsFromMap = xrefsFromMap;
 				PendingModules = new HashSet<ModuleDefMD>();
 				ProcessingModules = new HashSet<ModuleDefMD>();
 				ProcessedModules = new HashSet<ModuleDefMD>();
@@ -30,8 +30,8 @@ namespace StrongNameFinder {
 
 		private static void Execute(string directory) {
 			var modules = LoadModules(directory);
-			var referencesMap = LoadReferencesMap(modules);
-			var context = new Context(modules, referencesMap) {
+			var xrefsFromMap = LoadXrefsFromMap(LoadXrefsToMap(modules));
+			var context = new Context(modules, xrefsFromMap) {
 				PendingModules = modules.Where(t => t.IsStrongNameSigned).ToHashSet()
 			};
 			int indent = 0;
@@ -40,9 +40,9 @@ namespace StrongNameFinder {
 				context.PendingModules = new HashSet<ModuleDefMD>();
 				foreach (var module in context.ProcessingModules) {
 					Console.WriteLine(new string(' ', indent) + Path.GetRelativePath(directory, module.Location));
-					foreach (var (refer, references) in context.ReferencesMap) {
-						if (references.Contains(module) && !context.ProcessingModules.Contains(refer) && !context.ProcessedModules.Contains(refer))
-							context.PendingModules.Add(refer);
+					foreach (var xref in context.XrefsFromMap[module]) {
+						if (!context.ProcessingModules.Contains(xref) && !context.ProcessedModules.Contains(xref))
+							context.PendingModules.Add(xref);
 					}
 					if (!context.ProcessedModules.Add(module))
 						throw new InvalidOperationException();
@@ -51,7 +51,7 @@ namespace StrongNameFinder {
 			}
 			//var strongNameModules = modules.Where(t => t.IsStrongNameSigned).ToArray();
 			//foreach (var strongNameModule in strongNameModules) {
-			//	var context = new Context(modules, referencesMap) {
+			//	var context = new Context(modules, xrefsFromMap) {
 			//		PendingModules = new HashSet<ModuleDefMD> { strongNameModule }
 			//	};
 			//	int indent = 0;
@@ -60,9 +60,9 @@ namespace StrongNameFinder {
 			//		context.PendingModules = new HashSet<ModuleDefMD>();
 			//		foreach (var module in context.ProcessingModules) {
 			//			Console.WriteLine(new string(' ', indent) + Path.GetRelativePath(directory, module.Location));
-			//			foreach (var (refer, references) in context.ReferencesMap) {
-			//				if (references.Contains(module) && !context.ProcessingModules.Contains(refer) && !context.ProcessedModules.Contains(refer))
-			//					context.PendingModules.Add(refer);
+			//			foreach (var xref in context.XrefsFromMap[module]) {
+			//				if (!context.ProcessingModules.Contains(xref) && !context.ProcessedModules.Contains(xref))
+			//					context.PendingModules.Add(xref);
 			//			}
 			//			if (!context.ProcessedModules.Add(module))
 			//				throw new InvalidOperationException();
@@ -131,9 +131,9 @@ namespace StrongNameFinder {
 			return moduleContext;
 		}
 
-		private static List<(ModuleDefMD Module, ModuleDefMD[] References)> LoadReferencesMap(IEnumerable<ModuleDefMD> modules) {
+		private static Dictionary<ModuleDefMD, ModuleDefMD[]> LoadXrefsToMap(IEnumerable<ModuleDefMD> modules) {
 			Console.WriteLine("开始解析引用");
-			var referencesMap = new List<(ModuleDefMD Module, ModuleDefMD[] References)>();
+			var xrefsToMap = new Dictionary<ModuleDefMD, ModuleDefMD[]>();
 			foreach (var module in modules) {
 				Console.WriteLine($"正在解析 {module.Assembly.Name} 的引用");
 				var assemblyRefs = module.GetAssemblyRefs().Distinct(AssemblyNameComparer.CompareAll).Cast<AssemblyRef>().ToArray();
@@ -156,11 +156,24 @@ namespace StrongNameFinder {
 						Console.WriteLine(unresolvedReference.ToString());
 				}
 
-				referencesMap.Add((module, resolvedReferences.ToArray()));
+				xrefsToMap.Add(module, resolvedReferences.ToArray());
 			}
 			Console.WriteLine("解析引用完成");
 			Console.WriteLine();
-			return referencesMap;
+			return xrefsToMap;
+		}
+
+		private static Dictionary<ModuleDefMD, ModuleDefMD[]> LoadXrefsFromMap(Dictionary<ModuleDefMD, ModuleDefMD[]> xrefsToMap) {
+			var xrefsFromMap = new Dictionary<ModuleDefMD, ModuleDefMD[]>();
+			foreach (var module in xrefsToMap.Keys) {
+				var xrefsFrom = new List<ModuleDefMD>();
+				foreach (var xrefsTo in xrefsToMap) {
+					if (xrefsTo.Value.Contains(module))
+						xrefsFrom.Add(xrefsTo.Key);
+				}
+				xrefsFromMap.Add(module, xrefsFrom.ToArray());
+			}
+			return xrefsFromMap;
 		}
 	}
 }
