@@ -8,4 +8,8 @@
 	<ItemGroup>
 		<PackageReference Include="dnlib" Version="3.3.2" />
 	</ItemGroup>
+	<PropertyGroup>
+		<OutputPath>..\bin\$(Configuration)</OutputPath>
+		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+	</PropertyGroup>
 </Project>
