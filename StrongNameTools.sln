@@ -5,7 +5,9 @@ VisualStudioVersion = 16.0.30907.101
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "StrongNameBatchRemover", "StrongNameBatchRemover\StrongNameBatchRemover.csproj", "{F8166362-6027-4FD0-931E-B269F64593E5}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StrongNameFinder", "StrongNameFinder\StrongNameFinder.csproj", "{63688842-DFC6-45DF-A698-7B458E28668D}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "StrongNameFinder", "StrongNameFinder\StrongNameFinder.csproj", "{63688842-DFC6-45DF-A698-7B458E28668D}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "PublicKeyExtractor", "PublicKeyExtractor\PublicKeyExtractor.csproj", "{D466CD0A-0856-48C6-9D53-EAB3E01E2583}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -21,6 +23,10 @@ Global
 		{63688842-DFC6-45DF-A698-7B458E28668D}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{63688842-DFC6-45DF-A698-7B458E28668D}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{63688842-DFC6-45DF-A698-7B458E28668D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D466CD0A-0856-48C6-9D53-EAB3E01E2583}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D466CD0A-0856-48C6-9D53-EAB3E01E2583}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D466CD0A-0856-48C6-9D53-EAB3E01E2583}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D466CD0A-0856-48C6-9D53-EAB3E01E2583}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
